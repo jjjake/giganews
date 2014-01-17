@@ -50,7 +50,6 @@ def inline_compress_chunk(chunk, level=9):
     b = cStringIO.StringIO()
     g = gzip.GzipFile(fileobj=b, mode='wb', compresslevel=level)
     g.write(chunk)
-    #g.write('\n')
     g.close()
     return b.getvalue()
 
@@ -94,7 +93,8 @@ def save_article(article_number, group):
         sys.stderr.write(
             'error downloading article #{0}: {1}\n'.format(article_number, e))
         return None
-    mbox = email.message_from_string('\n'.join(msg_list))
+    msg_str = '\n'.join(msg_list) + '\n'
+    mbox = email.message_from_string(msg_str)
     mbox = mbox.as_string(unixfrom=True)
 
     # Compress chunk and append to gzip file.
@@ -153,7 +153,7 @@ if __name__ == '__main__':
         identifier = 'usenet-{0}'.format('.'.join(group.split('.')[:2]))
         item = get_item(identifier)
         state = item.get_metadata(target='state')
-        first = state.get(group, _first)
+        first = str(state.get(group, _first))
 
         # Exclude all groups with binaries (is this too much?).
         if 'binaries' in group:
@@ -194,3 +194,5 @@ if __name__ == '__main__':
                                                          date=COLLECTION_DATE)
             item.upload([idx_fname, mbox_fname], verbose=True)
             item.modify_metadata(state, target='state')
+            os.remove(idx_fname)
+            os.remove(mbox_fname)
