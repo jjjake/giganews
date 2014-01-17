@@ -1,23 +1,21 @@
 #!/usr/bin/env python
 import time
-import argparse
+import threading
 import os.path
-import cStringIO
-import gzip
 import sys
+import email
+import gzip
+import cStringIO
 import rfc822
 import dateutil.parser
-import threading
-from operator import itemgetter
 import datetime
 import csv
-import email
-import json
+from operator import itemgetter
 
 import nntplib
-import magic
 from internetarchive import get_item
 import futures
+import magic
 
 
 COLLECTION_DATE = time.strftime('%Y%m%d')
@@ -146,10 +144,6 @@ def index_article(msg_list, article_number, start, length):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Archive Giganews.')
-    parser.add_argument('--list-file', type=str, default=LIST_FILE)
-    args = parser.parse_args()
-
     s = nntplib.NNTP('news.giganews.com')
     if not os.path.exists(LIST_FILE):
         s.list(file=LIST_FILE)
@@ -196,7 +190,7 @@ if __name__ == '__main__':
             state[group] = max(articles_archived)
             idx_fname = '{group}.mbox.{date}.csv.gz'.format(group=group,
                                                             date=COLLECTION_DATE)
-            mbox_fname = '{group}.mbox.{date}.gz'.format(group=group, 
+            mbox_fname = '{group}.mbox.{date}.gz'.format(group=group,
                                                          date=COLLECTION_DATE)
             item.upload([idx_fname, mbox_fname], verbose=True)
             item.modify_metadata(state, target='state')
