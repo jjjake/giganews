@@ -61,7 +61,9 @@ def compress_and_sort_index(group):
     sorted_index = sorted(index, key=itemgetter(0))
     gzip_idx_fname = idx_fname + '.gz'
 
-    header = ['#date', 'msg_id', 'from', 'newsgroups', 'subject', 'start', 'length']
+    header = [
+        '#date', 'msg_id', 'from', 'newsgroups', 'subject', 'referrer', 'start','length'
+    ]
     s = cStringIO.StringIO()
     writer = csv.writer(s, dialect='excel-tab')
     writer.writerow(header)
@@ -98,7 +100,7 @@ def save_article(article_number, group):
     mbox = mbox.as_string(unixfrom=True)
 
     # Compress chunk and append to gzip file.
-    gzip_fname = '{group}.mbox.{date}.gz'.format(group=group, date=COLLECTION_DATE)
+    gzip_fname = '{group}.{date}.mbox.gz'.format(group=group, date=COLLECTION_DATE)
     compressed_chunk = inline_compress_chunk(mbox)
     length = sys.getsizeof(compressed_chunk)
     with MBOX_LOCK:
@@ -132,7 +134,7 @@ def index_article(msg_list, article_number, start, length):
     if date:
         date = get_utc_iso_date(date)
     idx_line = (date, h.get('message-id'), h.get('from'), h.get('newsgroups'),
-                h.get('subject'), start, length)
+                h.get('subject'), h.get('x-ref'), start, length)
     idx_fname = '{group}.mbox.{date}.csv'.format(group=group, date=COLLECTION_DATE)
     s = cStringIO.StringIO()
     writer = csv.writer(s, dialect='excel-tab')
@@ -188,11 +190,24 @@ if __name__ == '__main__':
         finally:
             compress_and_sort_index(group)
             state[group] = max(articles_archived)
-            idx_fname = '{group}.mbox.{date}.csv.gz'.format(group=group,
+            idx_fname = '{group}.{date}.mbox.csv.gz'.format(group=group,
                                                             date=COLLECTION_DATE)
-            mbox_fname = '{group}.mbox.{date}.gz'.format(group=group,
+            mbox_fname = '{group}.{date}.mbox.gz'.format(group=group,
                                                          date=COLLECTION_DATE)
-            item.upload([idx_fname, mbox_fname], verbose=True)
+            item_group = item.identifier.replace('usenet-', '')
+            metadata = dict(
+                title=('Usenet groups within {group} '
+                       'from giganews.com'.format(group=item_group)),
+                operator='jake@archive.org',
+                subjcet=group,
+                description=('Usenet newsgroups within "{group}", contributed courtesy '
+                             'of <a href=//www.giganews.com/">giganews.com</a>. '
+                             'These captures omit most binary '
+                             'posts.'.format(group=item_group)),
+                contributor='Giganews',
+                collection='giganews',
+            )
+            item.upload([idx_fname, mbox_fname], metadata=metadata, verbose=True)
             item.modify_metadata(state, target='state')
             os.remove(idx_fname)
             os.remove(mbox_fname)
