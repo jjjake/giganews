@@ -102,19 +102,23 @@ def get_utc_iso_date(date_str):
 
 
 def download_article(article_number, group):
-    try:
-        _s = nntplib.NNTP('news.giganews.com')
-        _s.group(group)
-        #resp, _, msg_id, msg_list = _s.article(article_number)
-        resp = _s.article(article_number)
-        _s.quit()
-        return resp
-        if is_binary('\n'.join(msg_list)):
-            return None
-    except nntplib.NNTPTemporaryError as e:
-        sys.stderr.write(
-            'error downloading article #{0}: {1}\n'.format(article_number, e))
-        return False
+    i = 0
+    while True:
+        try:
+            _s = nntplib.NNTP('news.giganews.com', readermode=True)
+            _s.group(group)
+            resp = _s.article(article_number)
+            _s.quit()
+            if resp:
+                return resp
+        except EOFError:
+            time.sleep(1)
+            if i >= 10:
+                return False
+        except nntplib.NNTPTemporaryError as e:
+            sys.stderr.write(
+                'error downloading article #{0}: {1}\n'.format(article_number, e))
+            return False
 
 
 def save_article(article_number, group):
@@ -184,21 +188,29 @@ def index_article(msg_str, article_number, start, length):
 
 if __name__ == '__main__':
     run_concurrently = True
-    s = nntplib.NNTP('news.giganews.com')
+    s = nntplib.NNTP('news.giganews.com', readermode=True)
     if not os.path.exists(LIST_FILE):
         s.list(file=LIST_FILE)
+        s.quit()
     try:
-        state = json.load(open(STATE_FILE))
+        local_state = json.load(open(STATE_FILE))
     except:
-        state = {}
+        local_state = {}
 
     for line in open(LIST_FILE):
+        s = nntplib.NNTP('news.giganews.com', readermode=True)
         group, last, _first, flag = line.strip().split()
         identifier = 'usenet-{0}'.format('.'.join(group.split('.')[:2]))
         item = get_item(identifier)
-        if not state:
-            state = item.get_metadata(target='state')
-        first = str(state.get(group, _first))
+
+        remote_state = item.get_metadata(target='state')
+        if local_state.get(group):
+            first = str(local_state[group])
+        elif remote_state.get(group):
+            first = str(remote_state[group])
+        else:
+            first = _first
+        state = {group: first}
 
         # Exclude all groups with binaries (is this too much?).
         # TODO: Yes, this is too much.
@@ -253,7 +265,7 @@ if __name__ == '__main__':
                 with open(STATE_FILE, 'w') as fp:
                     json.dump(state, fp)
                 raise
-
+        s.quit()
         compress_and_sort_index(group)
         state[group] = max(articles_archived)
         idx_fname = '{group}.{date}.mbox.csv.gz'.format(group=group,
