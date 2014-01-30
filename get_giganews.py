@@ -11,7 +11,6 @@ import dateutil.parser
 import datetime
 import csv
 from operator import itemgetter
-import traceback
 import json
 
 import nntplib
@@ -28,21 +27,31 @@ MBOX_LOCK = threading.RLock()
 IDX_LOCK = threading.RLock()
 
 
-def is_binary(text_buffer):
-    """Check a given text_buffer for binary data.
+def is_binary(string):
+    """Check if `string` contains binary data.
 
-    :type text_buffer: str
-    :param text_buffer: The text buffer to be tested for binary data.
+    :type string: str
+    :param string: The text buffer to be tested for binary data.
 
     :rtype: bool
-    :returns: True if `text_buffer` is binary, else False.
+    :returns: True if `string` is binary, else False.
 
     """
-    data_type = magic.from_buffer(text_buffer)
+    data_type = magic.from_buffer(string)
     return True if data_type == 'data' else False
 
 
 def encode_str(string, encoding='UTF-8'):
+    """Attempt to detect the native encoding of `string`, and re-encode
+    to utf-8
+
+    :type string: str
+    :param string: The string to be encoded.
+
+    :rtype: str
+    :returns: A utf-8 encoded string.
+
+    """
     if not string:
         return ''
     src_enc = chardet.detect(string)['encoding']
@@ -53,19 +62,34 @@ def encode_str(string, encoding='UTF-8'):
 
 
 def inline_compress_chunk(chunk, level=9):
-    """Join a list with '\n' and compress using gzip.
+    """Compress a string using gzip.
 
-    :type chunk: list
-    :param chunk: A list of strings to be compressed by gzip.
+    :type chunk: str
+    :param chunk: The string to be compressed.
 
     :rtype: str
-    :returns: The gzip compressed chunk represented as a string.
+    :returns: `chunk` compressed.
     """
     b = cStringIO.StringIO()
     g = gzip.GzipFile(fileobj=b, mode='wb', compresslevel=level)
     g.write(chunk)
     g.close()
     return b.getvalue()
+
+
+def get_utc_iso_date(date_str):
+    try:
+        utc_tuple = dateutil.parser.parse(date_str).utctimetuple()
+    except ValueError:
+        try:
+            date_str = ' '.join(date_str.split(' ')[:-1])
+            utc_tuple = dateutil.parser.parse(date_str).utctimetuple()
+        except ValueError:
+            date_str = ''.join(date_str.split('(')[:-1]).strip(')')
+            utc_tuple = dateutil.parser.parse(date_str).utctimetuple()
+    date_object = datetime.datetime.fromtimestamp(time.mktime(utc_tuple))
+    utc_date_str = ''.join([x for x in date_object.isoformat() if x not in '-T:'])
+    return utc_date_str
 
 
 def compress_and_sort_index(group):
@@ -75,9 +99,12 @@ def compress_and_sort_index(group):
     sorted_index = sorted(index, key=itemgetter(0))
     gzip_idx_fname = idx_fname + '.gz'
 
+    # Include UTF-8 BOM in header.
     header = [
-        '\xef\xbb\xbf#date', 'msg_id', 'from', 'newsgroups', 'subject', 'references', 'start','length'
+        '\xef\xbb\xbf#date', 'msg_id', 'from', 'newsgroups', 'subject', 'references',
+        'start', 'length',
     ]
+
     s = cStringIO.StringIO()
     writer = csv.writer(s, dialect='excel-tab')
     writer.writerow(header)
@@ -88,17 +115,6 @@ def compress_and_sort_index(group):
     with open(gzip_idx_fname, 'ab') as fp:
         fp.write(compressed_index)
     os.remove(idx_fname)
-
-
-def get_utc_iso_date(date_str):
-    try:
-        utc_tuple = dateutil.parser.parse(date_str).utctimetuple()
-    except ValueError:
-        date_str = ' '.join(date_str.split(' ')[:-1])
-        utc_tuple = dateutil.parser.parse(date_str).utctimetuple()
-    date_object = datetime.datetime.fromtimestamp(time.mktime(utc_tuple))
-    utc_date_str = ''.join([x for x in date_object.isoformat() if x not in '-T:'])
-    return utc_date_str
 
 
 def download_article(article_number, group):
@@ -112,13 +128,11 @@ def download_article(article_number, group):
             if resp:
                 return resp
         except EOFError:
+            i += 1
             time.sleep(1)
-            if i >= 10:
+        except Exception as e:
+            if e.response == '430 no such article' or i >= 10:
                 return False
-        except nntplib.NNTPTemporaryError as e:
-            sys.stderr.write(
-                'error downloading article #{0}: {1}\n'.format(article_number, e))
-            return False
 
 
 def save_article(article_number, group):
@@ -148,7 +162,9 @@ def save_article(article_number, group):
 
     # Append index information to idx file.
     index_article(msg_str, article_number, start, length)
-    sys.stdout.write(' save article #{a}\n'.format(a=article_number))
+    sys.stdout.flush()
+    sys.stdout.write('\r saved article #{a}'.format(a=article_number))
+    sys.stdout.flush()
     return article_number
 
 
@@ -187,7 +203,6 @@ def index_article(msg_str, article_number, start, length):
 
 
 if __name__ == '__main__':
-    run_concurrently = True
     s = nntplib.NNTP('news.giganews.com', readermode=True)
     if not os.path.exists(LIST_FILE):
         s.list(file=LIST_FILE)
@@ -203,6 +218,7 @@ if __name__ == '__main__':
         identifier = 'usenet-{0}'.format('.'.join(group.split('.')[:2]))
         item = get_item(identifier)
 
+        # Get state.
         remote_state = item.get_metadata(target='state')
         if local_state.get(group):
             first = str(local_state[group])
@@ -212,27 +228,33 @@ if __name__ == '__main__':
             first = _first
         state = {group: first}
 
-        # Exclude all groups with binaries (is this too much?).
-        # TODO: Yes, this is too much.
-        if 'binaries' in group:
-            sys.stdout.write(
-                'Skipping {group}, appears to be a binaries group\n'.format(group=group))
-            continue
-
         # Check for new articles.
-        sys.stdout.write('Archiving {group}\n'.format(group=group))
+        sys.stdout.write('\nArchiving {group}\n'.format(group=group))
         count = int(last) - int(first)
         if count <= 0:
             sys.stdout.write(' no new articles found\n'.format(c=count))
             continue
-        sys.stdout.write(' {c} new articles found\n'.format(c=count))
+
+        if count > 10000:
+            print 'skip'
+            continue
+        if '.' not in group:
+            print 'skip'
+            continue
 
         # Archive new articles.
         s.group(group)
         resp, article_list = s.xover(first, last)
+        s.quit()
+
         articles_archived = []
         article_numbers = tuple(a[0] for a in article_list)
+        sys.stdout.write(' articles found: {c}\n'.format(c=len(article_numbers)))
+        sys.stdout.write(' first article: #{0}.\n'.format(first))
+        sys.stdout.write(' last article: #{0}.\n'.format(max(article_numbers)))
 
+        # Concurrently download and index all articles in group that
+        # haven't been archived yet.
         with futures.ThreadPoolExecutor(max_workers=30) as e:
             try:
                 future_to_article = {
@@ -260,37 +282,72 @@ if __name__ == '__main__':
                     if len(pending_futures) == 0:
                         break
                     time.sleep(1)
-
+                raise
+            finally:
                 state[group] = max(articles_archived)
                 with open(STATE_FILE, 'w') as fp:
                     json.dump(state, fp)
-                raise
-        s.quit()
+
+        # Compress and sort index, upload and record state.
         compress_and_sort_index(group)
-        state[group] = max(articles_archived)
         idx_fname = '{group}.{date}.mbox.csv.gz'.format(group=group,
                                                         date=COLLECTION_DATE)
         mbox_fname = '{group}.{date}.mbox.gz'.format(group=group,
                                                      date=COLLECTION_DATE)
         item_group = item.identifier.replace('usenet-', '')
+        count = (int(item.metadata.get('metadata', {}).get('imagecount', 0)) +
+                    len(articles_archived))
+        subject = item.metadata.get('metadata', {}).get('subject')
+        if not isinstance(subject, list):
+            subject = [subject]
+        if group not in subject:
+            subject.append(group)
         metadata = dict(
             title=('Usenet groups within {group} '
                    'from giganews.com'.format(group=item_group)),
             operator='jake@archive.org',
-            subjcet=group,
             description=('Usenet newsgroups within "{group}", contributed courtesy '
                          'of <a href=//www.giganews.com/">giganews.com</a>. '
                          'These captures omit most binary '
                          'posts.'.format(group=item_group)),
+            subject=group,
             contributor='Giganews',
             collection='giganews',
+            imagecount=count,
         )
 
-        resps = item.upload([idx_fname, mbox_fname], metadata=metadata, verbose=True)
-        assert [r.status_code for r in resps] == [200, 200]
-        if not item.get_metadata(target='metadata').get('contributor'):
-            item.modify_metadata(metadata)
-        resp = item.modify_metadata(state, target='state')
-        if resp.get('status_code'):
-            os.remove(idx_fname)
-            os.remove(mbox_fname)
+        sys.stdout.write('\n uploading data to {0}\n'.format(item.identifier))
+        resps = item.upload([idx_fname, mbox_fname], metadata=metadata)
+        if [r.status_code for r in resps] != [200, 200]:
+            sys.stderr.write('error uploading data.\n')
+            sys.exit(1)
+
+        sys.stdout.write(' updating imagecount\n')
+        i = 0
+        while True:
+            resp = item.modify_metadata({'imagecount': count, 'subject': subject})
+            if resp.get('status_code') == 200:
+                break
+            else:
+                time.sleep(2)
+                i += 1
+            if i >= 10:
+                sys.stderr.write(
+                    ' error modifying imagecount. imagecount is: {0}\n'.format(count))
+                sys.exit(1)
+
+        sys.stdout.write(' updating state\n')
+        i = 0
+        while True:
+            resp = item.modify_metadata(state, target='state')
+            if resp.get('status_code') == 200:
+                os.remove(idx_fname)
+                os.remove(mbox_fname)
+                break
+            else:
+                time.sleep(2)
+                i += 1
+            if i >= 10:
+                sys.stderr.write(
+                    'error modifying state. state is: {0}\n'.format(state.get('group')))
+                sys.exit(1)
