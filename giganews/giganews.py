@@ -1,6 +1,7 @@
 import gevent.monkey
 gevent.monkey.patch_all()
 import gevent
+import gevent.queue
 
 import email
 import sys
@@ -13,12 +14,14 @@ import futures
 from operator import itemgetter
 import os
 import json
+import traceback
+import time
 
 import nntplib
 from internetarchive import get_item
 import cStringIO
 
-from .utils import is_binary, inline_compress_chunk, utf8_encode_str, get_utc_iso_date
+from .utils import is_binary, inline_compress_chunk, utf8_encode_str, get_utc_iso_date, clean_up
 from .logging import set_logger
 
 
@@ -35,6 +38,9 @@ class NewsGroup(object):
 
     def __init__(self, name, user=None, password=None, ia_sync=True, 
                  max_nntp_connections=50, logging_level='INFO'):
+        
+        #TODO: The order of these attributes matter...
+        # make that more clear!
 
         self.MAX_NNTP_CONNECTIONS = max_nntp_connections
         self.log = set_logger(self.log_level[logging_level], 'giganews.log')
@@ -44,17 +50,18 @@ class NewsGroup(object):
         self.item = get_item(self.identifier)
         self.state = self.get_item_state()
         self.articles_archived = []
-
         self.user = user
         self.password = password
-        self.connections = []
+        self._response =  None
+        self.connections = gevent.queue.Queue(50)
 
         # load group.
-        _c = self._load_connection()
-        self._response =  _c.group(self.name)
+        if self.connections.empty():
+            self._load_connection()
+        _c = self.connections.get()
         _, count, first, last, _ = self._response
         nntp_date = _c.date()        
-        _c.quit()
+        self.connections.put(_c)
 
         # nntp_date = ('111 20140508035909', '140508', '035909')
         self.date = nntp_date[0].split()[-1][:8]
@@ -64,12 +71,16 @@ class NewsGroup(object):
         self.name = name
 
         if ia_sync:
-            self.first = self.state[self.name]
+            self.first = str(self.state[self.name])
+
+        self.article_numbers = self._get_article_numbers()
 
         self._mbox_lock = threading.RLock()
         self._idx_lock = threading.RLock()
 
 
+    # get_item_state()
+    # ____________________________________________________________________________________
     def get_item_state(self):
         # get local state.
         try:
@@ -90,50 +101,72 @@ class NewsGroup(object):
         state[self.name] = first
         return state
 
-    @property
-    def article_numbers(self):
-        if self.connections:
-            _c = self.connections[0]
-        else:
-            _c = self._load_connection()
 
-        _c.group(self.name)
+    # _get_article_numbers()
+    # ____________________________________________________________________________________
+    def _get_article_numbers(self):
+        if self.connections.empty():
+            self._load_connection()
+        _c = self.connections.get()
+
         _, article_list = _c.xover(self.first, self.last)
         
-        # Only quit if a cached connections wasn't used.
-        if self.connections:
-            self.connections.append(_c)
+        self.connections.put(_c)
         return tuple(a[0] for a in article_list)
 
     
     # _load_connection()
     # ____________________________________________________________________________________
-    def _load_connection(self, cache_connection=False):
-        c = nntplib.NNTP('news.giganews.com', user=self.user, password=self.password, 
-                         readermode=True)
-        self.log.debug('initialized new connection')
-        if cache_connection:
-            self.connections.append(c)
-            self.log.debug('cached connection')
-        return c
+    def _load_connection(self):
+        retries = 0
+        while True:
+            try:
+                c = nntplib.NNTP('news.giganews.com', user=self.user, 
+                                 password=self.password, readermode=True)
+                self._response = c.group(self.name)
+                self.connections.put(c)
+                break
+            except nntplib.NNTPTemporaryError as exc:
+                if (exc.response.startswith('481')) \
+                    and (self.connections.qsize() != self.MAX_NNTP_CONNECTIONS):
+                        if retries == 10:
+                            break
+                        time.sleep(1)
+                        retries += 1
+                else:
+                    break
 
 
     # load_max_connections()
     # ____________________________________________________________________________________
     def load_max_connections(self):
-        if len(self.connections) >= self.MAX_NNTP_CONNECTIONS:
+        if self.connections.qsize() >= self.MAX_NNTP_CONNECTIONS:
             return
-
-        # Load MAX_NNTP_CONNECTIONS asynchronously.
-        if len(self.connections) < self.MAX_NNTP_CONNECTIONS:
-            connections_needed = (self.MAX_NNTP_CONNECTIONS - len(self.connections))
-        else:
-            connections_needed = self.MAX_NNTP_CONNECTIONS
-
+        connections_needed = self.MAX_NNTP_CONNECTIONS - self.connections.qsize()
         threads = []
         for x in range(0, connections_needed):
-            threads.append(gevent.spawn(self._load_connection, True))
+            threads.append(gevent.spawn(self._load_connection))
         gevent.joinall(threads)
+
+
+    # close_all_connections()
+    # ____________________________________________________________________________________
+    def close_all_connections(self):
+        threads = []
+        while not self.connections.empty():
+            try:
+                _c = self.connections.get();
+                threads.append(gevent.spawn(_c.quit))
+            except AttributeError:
+                continue
+        gevent.joinall(threads)
+
+
+    # refresh_all_connections()
+    # ____________________________________________________________________________________
+    def refresh_all_connections(self):
+        self.close_all_connections()
+        self.load_max_connections()
 
 
     # archive_articles()
@@ -146,15 +179,20 @@ class NewsGroup(object):
                 executor.submit(self._download_article, a): a for a in self.article_numbers
             }
             for future in futures.as_completed(future_to_article):
-                article_number = future_to_article[future]
                 try:
-                    resp = future.result()
-                    self.save_article(resp, article_number)
-                except:
-                    traceback.print_exc()
+                    _a = future_to_article.get(future)
+                    r = future.result()
+                    self.save_article(r, _a)
+                except Exception as exc:
+                    raise Exception("".join(traceback.format_exception(*sys.exc_info())))
 
-        self.connections = []
-        self.compress_and_sort_index()
+        self.close_all_connections()
+
+        r = self.compress_and_sort_index()
+        if not r:
+            clean_up(self.name, self.item.identifier, self.date)
+            return
+
         self.state[self.name] = max(self.articles_archived)
         local_state_fname = '{identifier}_state.json'.format(**self.__dict__)
         with open(local_state_fname, 'w') as fp:
@@ -182,64 +220,56 @@ class NewsGroup(object):
         :returns: nntplib article response object if successful, else False.
 
         """
-        # Get connection.
-        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        while True:
-            try:
-                _connection = self.connections.pop()
-                _connection.group(self.name)
-                break
-            except IndexError:
-                self.log.warning('no connections available...')
+        _connection = self.connections.get()
+        try:
+            i = 0
+            while True:
+                if i >= max_retries:
+                    return False
 
-        # Download Article.
-        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        i = 0
-        while True:
-            if i >= max_retries:
-                self.log.error('failed to retrieve article')
-                return False
+                try:
+                    resp = _connection.article(article_number)
+                    return resp
 
-            try:
-                resp = _connection.article(article_number)
-                return resp
+                # Connection closed, transient error, retry forever.
+                except EOFError:
+                    self.log.warning('EOFError, refreshing connection retrying -- '
+                                     'article={0}, group={1}'.format(article_number, 
+                                                                     self.name))
+                    _connection.quit()
+                    self._load_connection()
+                    _connection = self.connections.get()
 
-            # Connection closed, transient error, retry forever.
-            except EOFError:
-                self.log.warning('EOFError, refreshing connection retrying -- '
-                                 'article={0}, group={1}'.format(article_number, 
-                                                                 self.name))
-                _connection.quit()
-                _connection = self._load_connection()
+                # NNTP Error.
+                except nntplib.NNTPError as exc:
+                    self.log.warning('NNTPError: {0} -- article={1}, '
+                                     'group={2}'.format(exc, article_number, self.name))
+                    if any(s in exc.response for s in ['430', '423']):
+                        # Don't retry, article probably doesn't exist.
+                        i = max_retries
+                    else:
+                        i += 1
+                except Exception:
+                    return
 
-            # NNTP Error.
-            except nntplib.NNTPError as exc:
-                self.log.warning('NNTPError: {0} -- article={1}, '
-                                 'group={2}'.format(exc, article_number, self.name))
-                if any(s in exc.response for s in ['430', '423']):
-                    # Don't retry, article probably doesn't exist.
-                    i = max_retries
-                else:
-                    i += 1
-            except Exception:
-                return
-
-            # Always return connection back to the pool!
-            finally:
-                self.connections.append(_connection)
+        # Always return connection back to the pool!
+        finally:
+            self.connections.put(_connection)
 
 
     # save_article()
     # ____________________________________________________________________________________
     def save_article(self, response, article_number, max_retries=10, skip_binary=True):
-        #response = self._download_article(article_number)
-        r, _, _, msg_list = response
+        try:
+            r, _, _, msg_list = response
+        except TypeError:
+            return False
         msg_str = '\n'.join(msg_list) + '\n\n'
 
         if is_binary(msg_str):
             self.log.debug('skipping binary post, {0} {1}'.format(self.name, 
                                                                   article_number))
-            return
+            return False
 
         # Convert msg_list into an `email.Message` object.
         mbox = email.message_from_string(msg_str)
@@ -325,7 +355,10 @@ class NewsGroup(object):
 
         """
         idx_fname = '{name}.{date}.mbox.csv'.format(**self.__dict__)
-        reader = csv.reader(open(idx_fname), dialect='excel-tab')
+        try:
+            reader = csv.reader(open(idx_fname), dialect='excel-tab')
+        except IOError:
+            return False
         index = [x for x in reader if x]
         sorted_index = sorted(index, key=itemgetter(0))
         gzip_idx_fname = idx_fname + '.gz'

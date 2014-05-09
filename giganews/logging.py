@@ -16,7 +16,7 @@ def set_logger(log_level, path, logger_name='giganews'):
     """
     FmtString = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     log = logging.getLogger(logger_name)
-    log.setLevel(logging.DEBUG)
+    log.setLevel(log_level)
     fh = logging.FileHandler(path)
     fh.setLevel(log_level)
     formatter = logging.Formatter(FmtString)

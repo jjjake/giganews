@@ -10,37 +10,37 @@ import magic
 import cStringIO
 
 
-## clean_up()
-## ________________________________________________________________________________________
-#def clean_up(group, identifier):
-#    """Delete all of a groups local mbox, index, and state files.
-#
-#    :type group: str
-#    :param group: group name
-#
-#    :type identifier: str
-#    :param identifier: the identifier for the given group.
-#
-#    :rtype: bool
-#    :returns: True
-#
-#    """
-#    #log.error('exception raised, cleaning up files.')
-#    glob_pat = '{g}.{d}.mbox*'.format(g=group, d=COLLECTION_DATE)
-#    for f in glob(glob_pat):
-#        #log.error('removing {f}'.format(f=f))
-#        try:
-#            os.remove(f)
-#        except OSError:
-#            continue
-#    glob_pat = '{id}_state.json'.format(id=identifier)
-#    for f in glob(glob_pat):
-#        #log.error('removing {f}'.format(f=f))
-#        try:
-#            os.remove(f)
-#        except OSError:
-#            continue
-#    return True
+# clean_up()
+# ________________________________________________________________________________________
+def clean_up(group, identifier, date):
+    """Delete all of a groups local mbox, index, and state files.
+
+    :type group: str
+    :param group: group name
+
+    :type identifier: str
+    :param identifier: the identifier for the given group.
+
+    :rtype: bool
+    :returns: True
+
+    """
+    #log.error('exception raised, cleaning up files.')
+    glob_pat = '{g}.{d}.mbox*'.format(g=group, d=date)
+    for f in glob(glob_pat):
+        #log.error('removing {f}'.format(f=f))
+        try:
+            os.remove(f)
+        except OSError:
+            continue
+    glob_pat = '{id}_state.json'.format(id=identifier)
+    for f in glob(glob_pat):
+        #log.error('removing {f}'.format(f=f))
+        try:
+            os.remove(f)
+        except OSError:
+            continue
+    return True
 
 
 # is_binary()
