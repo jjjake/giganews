@@ -16,13 +16,16 @@ import os
 import json
 import traceback
 import time
+import logging
 
 import nntplib
 from internetarchive import get_item
 import cStringIO
 
 from .utils import is_binary, inline_compress_chunk, utf8_encode_str, get_utc_iso_date, clean_up
-from .logging import set_logger
+
+
+log = logging.getLogger(__name__)
 
 
 class NewsGroup(object):
@@ -43,7 +46,6 @@ class NewsGroup(object):
         # make that more clear!
 
         self.MAX_NNTP_CONNECTIONS = max_nntp_connections
-        self.log = set_logger(self.log_level[logging_level], 'giganews.log')
 
         self.name = name
         self.identifier = 'usenet-{0}'.format('.'.join(name.split('.')[:2])).replace('+', '-')
@@ -71,8 +73,6 @@ class NewsGroup(object):
 
         if ia_sync:
             self.first = str(self.state[self.name])
-
-        #self.article_numbers = self._article_number_generator()
 
         self._mbox_lock = threading.RLock()
         self._idx_lock = threading.RLock()
@@ -226,8 +226,8 @@ class NewsGroup(object):
         mbox_fname = '{name}.{date}.mbox.gz'.format(**self.__dict__)
         mbox_lck_fname = mbox_fname + '.lck'
         shutil.move(mbox_lck_fname, mbox_fname)
-        self.log.info('archived and indexed {0} '
-                      'articles from {1}'.format(len(self.articles_archived), self.name))
+        log.info('archived and indexed {0} '
+                 'articles from {1}'.format(len(self.articles_archived), self.name))
 
 
     # _download_article()
@@ -257,17 +257,16 @@ class NewsGroup(object):
 
                 # Connection closed, transient error, retry forever.
                 except EOFError:
-                    self.log.warning('EOFError, refreshing connection retrying -- '
-                                     'article={0}, group={1}'.format(article_number, 
-                                                                     self.name))
+                    log.warning('EOFError, refreshing connection retrying -- '
+                                'article={0}, group={1}'.format(article_number, self.name))
                     _connection.quit()
                     self._load_connection()
                     _connection = self.connections.get()
 
                 # NNTP Error.
                 except nntplib.NNTPError as exc:
-                    self.log.warning('NNTPError: {0} -- article={1}, '
-                                     'group={2}'.format(exc, article_number, self.name))
+                    log.warning('NNTPError: {0} -- article={1}, '
+                                'group={2}'.format(exc, article_number, self.name))
                     if any(s in exc.response for s in ['430', '423']):
                         # Don't retry, article probably doesn't exist.
                         i = max_retries
@@ -291,8 +290,8 @@ class NewsGroup(object):
         msg_str = '\n'.join(msg_list) + '\n\n'
 
         if is_binary(msg_str):
-            self.log.debug('skipping binary post, {0} {1}'.format(self.name, 
-                                                                  article_number))
+            log.debug('skipping binary post, {0} {1}'.format(self.name, 
+                                                             article_number))
             return False
 
         # Convert msg_list into an `email.Message` object.
@@ -311,7 +310,7 @@ class NewsGroup(object):
         # Append index information to idx file.
         self.index_article(msg_str, article_number, start, length)
         self.articles_archived.append(article_number)
-        self.log.info('saved article #{0} from {1}'.format(article_number, self.name))
+        log.info('saved article #{0} from {1}'.format(article_number, self.name))
 
 
     # index_article()
