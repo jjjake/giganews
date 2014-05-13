@@ -97,7 +97,9 @@ def inline_compress_chunk(chunk, level=9):
     g = gzip.GzipFile(fileobj=b, mode='wb', compresslevel=level)
     g.write(chunk)
     g.close()
-    return b.getvalue()
+    cc = b.getvalue()
+    b.close()
+    return cc
 
 
 # get_utc_iso_date()
