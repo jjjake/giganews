@@ -68,12 +68,11 @@ class NewsGroup(object):
         self.count = count
         self.first = first
         self.last = last
-        self.name = name
 
         if ia_sync:
             self.first = str(self.state[self.name])
 
-        self.article_numbers = self._get_article_numbers()
+        #self.article_numbers = self._article_number_generator()
 
         self._mbox_lock = threading.RLock()
         self._idx_lock = threading.RLock()
@@ -102,17 +101,39 @@ class NewsGroup(object):
         return state
 
 
-    # _get_article_numbers()
+    # _article_number_generator()
     # ____________________________________________________________________________________
-    def _get_article_numbers(self):
+    def _article_number_generator(self):
         if self.connections.empty():
             self._load_connection()
         _c = self.connections.get()
 
-        _, article_list = _c.xover(self.first, self.last)
-        
+        i = 0
+        while True:
+            # _c.next() only works after the first article has been
+            # selected.
+            if i == 0:
+                i += 1
+                try:
+                    resp, number, msg_id = _c.stat(self.first)
+                    yield number
+                except nntplib.NNTPTemporaryError as exc:
+                    # Only raise an NNTPTemporaryError exception if it
+                    # is not a 423 error. If it is a 423 error, _c.next()
+                    # will yield the first available article on the next
+                    # iteration.
+                    if not exc.response == '423 no such article in group':
+                        raise exc
+            try:
+                resp, number, msg_id = _c.next()
+                yield number
+            except nntplib.NNTPTemporaryError as exc:
+                if exc.response == '421 no next article':
+                    break
+                else:
+                    raise exc
+
         self.connections.put(_c)
-        return tuple(a[0] for a in article_list)
 
     
     # _load_connection()
@@ -128,13 +149,16 @@ class NewsGroup(object):
                 break
             except nntplib.NNTPTemporaryError as exc:
                 if (exc.response.startswith('481')) \
-                    and (self.connections.qsize() != self.MAX_NNTP_CONNECTIONS):
-                        if retries == 10:
-                            break
-                        time.sleep(1)
-                        retries += 1
+                    and (self.connections.qsize() <= self.MAX_NNTP_CONNECTIONS):
+                        continue
                 else:
-                    break
+                    raise exc
+            except EOFError:
+                continue
+            if retries == 20:
+                break
+            time.sleep(1)
+            retries += 1
 
 
     # load_max_connections()
@@ -176,7 +200,7 @@ class NewsGroup(object):
 
         with futures.ThreadPoolExecutor(self.MAX_NNTP_CONNECTIONS) as executor:
             future_to_article = {
-                executor.submit(self._download_article, a): a for a in self.article_numbers
+                executor.submit(self._download_article, a): a for a in self._article_number_generator()
             }
             for future in futures.as_completed(future_to_article):
                 try:
@@ -314,6 +338,7 @@ class NewsGroup(object):
         """
         f = cStringIO.StringIO(msg_str)
         message = rfc822.Message(f)
+        f.close()
 
         # Replace header dict None values with '', and any tabs or
         # newlines with ' '.
@@ -336,12 +361,15 @@ class NewsGroup(object):
         idx_line = (date, h.get('message-id'), h.get('from'), h.get('newsgroups'),
                     h.get('subject'), h.get('references', ''), start, length)
         idx_fname = '{name}.{date}.mbox.csv'.format(**self.__dict__)
+
         s = cStringIO.StringIO()
         writer = csv.writer(s, dialect='excel-tab')
         writer.writerow(idx_line)
         with self._idx_lock:
             with open(idx_fname, 'a') as fp:
                 fp.write(s.getvalue())
+        s.close()
+
         return True
 
 
@@ -375,6 +403,7 @@ class NewsGroup(object):
         for line in sorted_index:
             writer.writerow(line)
         compressed_index = inline_compress_chunk(s.getvalue())
+        s.close()
 
         with open(gzip_idx_fname, 'ab') as fp:
             fp.write(compressed_index)
