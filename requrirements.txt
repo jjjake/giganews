@@ -1,0 +1,8 @@
+python-magic==0.4.6
+futures==2.1.6
+gevent==1.0
+python-dateutil==1.5
+chardet==2.2.1
+pynntp==0.8.4
+internetarchive==0.5.7
+PyYAML==3.11
