@@ -19,7 +19,7 @@ def get_gzip_file_from_url(url):
 
 def audit_item(identifier):
     item = get_item(identifier)
-    files = list(item.files())
+    files = list(item.iter_files())
     idxs = [f for f in files if f.name.endswith('.csv.gz')]
     mboxs = [f for f in files if f.name.endswith('.mbox.gz')]
     imagecount = 0
