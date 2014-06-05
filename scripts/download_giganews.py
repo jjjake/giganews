@@ -1,12 +1,14 @@
 #!/home/jake/.virtualenvs/giganews/bin/python
+import gevent.monkey; gevent.monkey.patch_all()
+import gevent.pool
+
 import sys
 import time
 import random
 
 import logging
 import yaml
-import futures
-from giganews import NewsGroup
+from giganews import NewsGroup, GiganewsSession
 
 
 log = logging.getLogger('giganews')
@@ -27,51 +29,26 @@ def archive_group(group):
     if '.' not in group:
         return
 
-    while True:
-        try:
-            user, password = ACCOUNTS.pop()
-            break
-        except IndexError:
-            #log.debug('no accounts available, sleeping until one becomes available.')
-            time.sleep(10)
+    g = NewsGroup(group, session=sesh, logging_level='INFO', ia_sync=True)
 
-    try:
-        g = NewsGroup(group, user, password, logging_level='WARNING')
+    # Check for new articles.
+    count = int(g.last) - int(g.first)
+    if count <= 0:
+        log.info('no new articles found for {0}'.format(group))
+        return
 
-        # Check for new articles.
-        count = int(g.last) - int(g.first)
-        if count <= 0:
-            log.info('no new articles found for {0}'.format(group))
-            return
-
-        g.archive_articles()
-
-    finally:
-        ACCOUNTS.append((user, password))
-
-
-# init_accounts()
-# ________________________________________________________________________________________
-def init_accounts():
-    global ACCOUNTS
-    ACCOUNTS = yaml.load(open('/home/jake/.config/giganews.yml')).get('accounts', {}).items()
+    g.archive_articles()
 
 
 # ________________________________________________________________________________________
 if __name__ == '__main__':
-    init_accounts()
+    global sesh
+    sesh = GiganewsSession()
 
     news_list = [x.split()[0] for x in open('giganews_listfile.txt')]
     random.shuffle(news_list)
-
-    try:
-        # Concurrently archive all news for each newsgroup.
-        with futures.ThreadPoolExecutor(max_workers=len(ACCOUNTS)) as e:
-            future_to_group = {
-                e.submit(archive_group, group): group for group in news_list
-            }
-            for future in futures.as_completed(future_to_group):
-                group = future_to_group[future]
-                result = group.result()
-    except KeyboardInterrupt:
-        sys.exit(1)
+    pool = gevent.pool.Pool(16)
+    pool.map(archive_group, news_list)
+    #for g in news_list:
+    #    print g
+    #    archive_group(g)
