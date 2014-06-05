@@ -1,6 +1,7 @@
 import gevent.monkey
 gevent.monkey.patch_all()
 import gevent
+import gevent.pool
 import gevent.queue
 
 import email
@@ -10,7 +11,6 @@ import shutil
 import csv
 import rfc822
 import traceback
-import futures
 from operator import itemgetter
 import os
 import json
@@ -21,11 +21,115 @@ import logging
 import nntplib
 from internetarchive import get_item
 import cStringIO
+import yaml
 
 from .utils import is_binary, inline_compress_chunk, utf8_encode_str, get_utc_iso_date, clean_up
 
 
 log = logging.getLogger(__name__)
+
+
+class GiganewsSession(object):
+
+    def __init__(self):
+        self.accounts = self.init_accounts()
+        self.max_connections_per_account = 50
+        self.max_connections = len(self.accounts) * self.max_connections_per_account
+        self.connections = gevent.queue.Queue(self.max_connections)
+        self.load_max_connections()
+
+        self._archived_article_count = 0
+        self._timer = time.time()
+
+
+    # init_accounts()
+    # ____________________________________________________________________________________
+    def init_accounts(self):
+        a = yaml.load(open('/home/jake/.config/giganews.yml')).get('accounts', {}).items()
+        return a
+
+
+    # update_stats()
+    # ____________________________________________________________________________________
+    def update_stats(self):
+        self._archived_article_count += 1
+        if self._archived_article_count >= 1000:
+            self._archived_article_count = 0
+            start_time = self._timer 
+            self._timer = time.time()
+            total_time = (self._timer - start_time)
+            rate = 1000/total_time
+            log.info('article download rate is {0}/second.'.format(rate))
+
+
+    # _load_connection()
+    # ____________________________________________________________________________________
+    def _load_connection(self, user, password):
+        retries = 0
+        while True:
+            try:
+                c = nntplib.NNTP('news.giganews.com', user=user, 
+                                 password=password, readermode=True)
+                c.user = user
+                c.password = password
+                self.connections.put(c)
+                break
+            except nntplib.NNTPTemporaryError as exc:
+                if (exc.response.startswith('481')) \
+                    and (self.connections.qsize() <= self.max_connections):
+                        break
+                else:
+                    raise exc
+            except EOFError:
+                continue
+            if retries == 20:
+                break
+            time.sleep(1)
+            retries += 1
+
+
+    # load_max_connections()
+    # ____________________________________________________________________________________
+    def load_max_connections(self):
+        threads = []
+        for u, p in self.accounts:
+            for x in range(0, self.max_connections_per_account):
+                threads.append(gevent.spawn(self._load_connection, u, p))
+        gevent.joinall(threads)
+
+
+    # close_all_connections()
+    # ____________________________________________________________________________________
+    def close_all_connections(self):
+        threads = []
+        while not self.connections.empty():
+            try:
+                _c = self.connections.get()
+                threads.append(gevent.spawn(_c.quit))
+            except AttributeError:
+                continue
+        gevent.joinall(threads)
+
+
+    # refresh_connection()
+    # ____________________________________________________________________________________
+    def refresh_connection(self, connection):
+        user = connection.user
+        password = connection.password
+        try:
+            connection.quit()
+        except:
+            pass
+        finally:
+            self._load_connection(user, password)
+
+
+    # refresh_all_connections()
+    # ____________________________________________________________________________________
+    def refresh_all_connections(self):
+        self.close_all_connections()
+        self.load_max_connections()
+
 
 
 class NewsGroup(object):
@@ -39,31 +143,30 @@ class NewsGroup(object):
         'NOTSET': 0,
     }
 
-    def __init__(self, name, user=None, password=None, ia_sync=True, 
-                 max_nntp_connections=50, logging_level='INFO'):
+    def __init__(self, name, session=None, ia_sync=True, logging_level='INFO'):
         
         #TODO: The order of these attributes matter...
         # make that more clear!
 
-        self.MAX_NNTP_CONNECTIONS = max_nntp_connections
 
         self.name = name
         self.identifier = 'usenet-{0}'.format('.'.join(name.split('.')[:2])).replace('+', '-')
         self.item = get_item(self.identifier)
         self.state = self.get_item_state()
         self.articles_archived = []
-        self.user = user
-        self.password = password
         self._response =  None
-        self.connections = gevent.queue.Queue(50)
+        if not session:
+            self.session = GiganewsSession()
+        else:
+            self.session = session
 
         # load group.
-        if self.connections.empty():
-            self._load_connection()
-        _c = self.connections.get()
-        _, count, first, last, _ = self._response
-        nntp_date = _c.date()        
-        self.connections.put(_c)
+        try:
+            _c = self.session.connections.get()
+            _, count, first, last, _ = _c.group(name)
+            nntp_date = _c.date()        
+        finally:
+            self.session.connections.put(_c)
 
         # nntp_date = ('111 20140508035909', '140508', '035909')
         self.date = nntp_date[0].split()[-1][:8]
@@ -104,113 +207,55 @@ class NewsGroup(object):
     # _article_number_generator()
     # ____________________________________________________________________________________
     def _article_number_generator(self):
-        if self.connections.empty():
-            self._load_connection()
-        _c = self.connections.get()
+        try:
+            _c = self.session.connections.get()
+            _c.group(self.name)
 
-        i = 0
-        while True:
-            # _c.next() only works after the first article has been
-            # selected.
-            if i == 0:
-                i += 1
-                try:
-                    resp, number, msg_id = _c.stat(self.first)
-                    yield number
-                except nntplib.NNTPTemporaryError as exc:
-                    # Only raise an NNTPTemporaryError exception if it
-                    # is not a 423 error. If it is a 423 error, _c.next()
-                    # will yield the first available article on the next
-                    # iteration.
-                    if not exc.response == '423 no such article in group':
-                        raise exc
-            try:
-                resp, number, msg_id = _c.next()
-                yield number
-            except nntplib.NNTPTemporaryError as exc:
-                if exc.response == '421 no next article':
-                    break
-                else:
-                    raise exc
-
-        self.connections.put(_c)
-
-    
-    # _load_connection()
-    # ____________________________________________________________________________________
-    def _load_connection(self):
-        retries = 0
-        while True:
-            try:
-                c = nntplib.NNTP('news.giganews.com', user=self.user, 
-                                 password=self.password, readermode=True)
-                self._response = c.group(self.name)
-                self.connections.put(c)
-                break
-            except nntplib.NNTPTemporaryError as exc:
-                if (exc.response.startswith('481')) \
-                    and (self.connections.qsize() <= self.MAX_NNTP_CONNECTIONS):
+            i = 0
+            while True:
+                # _c.next() only works after the first article has been
+                # selected.
+                if i == 0:
+                    i += 1
+                    try:
+                        resp, number, msg_id = _c.stat(self.first)
+                        yield number
+                    except nntplib.NNTPTemporaryError as exc:
+                        # Only raise an NNTPTemporaryError exception if it
+                        # is not a 423 error. If it is a 423 error, _c.next()
+                        # will yield the first available article on the next
+                        # iteration.
+                        if not any(s in exc.response for s in ['430', '423']):
+                            raise exc
+                    except EOFError:
+                        log.warning('EOFError in _article_number_generator')
+                        self.session.refresh_connection(_c)
+                        _c = self.session.connections.get()
                         continue
                 else:
-                    raise exc
-            except EOFError:
-                continue
-            if retries == 20:
-                break
-            time.sleep(1)
-            retries += 1
+                    try:
+                        resp, number, msg_id = _c.next()
+                        yield number
+                    except nntplib.NNTPTemporaryError as exc:
+                        if exc.response == '421 no next article':
+                            break
+                        else:
+                            raise exc
+                    except EOFError:
+                        log.warning('EOFError in _article_number_generator')
+                        self.session.refresh_connection(_c)
+                        _c = self.session.connections.get()
 
+        finally:
+            self.session.connections.put(_c)
 
-    # load_max_connections()
-    # ____________________________________________________________________________________
-    def load_max_connections(self):
-        if self.connections.qsize() >= self.MAX_NNTP_CONNECTIONS:
-            return
-        connections_needed = self.MAX_NNTP_CONNECTIONS - self.connections.qsize()
-        threads = []
-        for x in range(0, connections_needed):
-            threads.append(gevent.spawn(self._load_connection))
-        gevent.joinall(threads)
-
-
-    # close_all_connections()
-    # ____________________________________________________________________________________
-    def close_all_connections(self):
-        threads = []
-        while not self.connections.empty():
-            try:
-                _c = self.connections.get();
-                threads.append(gevent.spawn(_c.quit))
-            except AttributeError:
-                continue
-        gevent.joinall(threads)
-
-
-    # refresh_all_connections()
-    # ____________________________________________________________________________________
-    def refresh_all_connections(self):
-        self.close_all_connections()
-        self.load_max_connections()
-
-
+    
     # archive_articles()
     # ____________________________________________________________________________________
     def archive_articles(self):
-        self.load_max_connections()
-
-        with futures.ThreadPoolExecutor(self.MAX_NNTP_CONNECTIONS) as executor:
-            future_to_article = {
-                executor.submit(self._download_article, a): a for a in self._article_number_generator()
-            }
-            for future in futures.as_completed(future_to_article):
-                try:
-                    _a = future_to_article.get(future)
-                    r = future.result()
-                    self.save_article(r, _a)
-                except Exception as exc:
-                    raise Exception("".join(traceback.format_exception(*sys.exc_info())))
-
-        self.close_all_connections()
+        log.info('downloading news from {name}'.format(**self.__dict__))
+        pool = gevent.pool.Pool(self.session.max_connections)
+        pool.map(self.save_article, self._article_number_generator())
 
         r = self.compress_and_sort_index()
         if not r:
@@ -244,7 +289,8 @@ class NewsGroup(object):
         :returns: nntplib article response object if successful, else False.
 
         """
-        _connection = self.connections.get()
+        log.debug('downloading article {0} from {1}'.format(article_number, self.name))
+        _connection = self.session.connections.get()
         try:
             i = 0
             while True:
@@ -252,16 +298,19 @@ class NewsGroup(object):
                     return False
 
                 try:
+                    _connection.group(self.name)
                     resp = _connection.article(article_number)
+                    log.debug('downloaded article {0} from {1}'.format(article_number,
+                                                                       self.name))
                     return resp
 
                 # Connection closed, transient error, retry forever.
                 except EOFError:
                     log.warning('EOFError, refreshing connection retrying -- '
                                 'article={0}, group={1}'.format(article_number, self.name))
-                    _connection.quit()
-                    self._load_connection()
-                    _connection = self.connections.get()
+                    self.session.refresh_connection(_connection)
+                    time.sleep(2)
+                    _connection = self.session.connections.get()
 
                 # NNTP Error.
                 except nntplib.NNTPError as exc:
@@ -272,45 +321,53 @@ class NewsGroup(object):
                         i = max_retries
                     else:
                         i += 1
-                except Exception:
-                    return
+                except:
+                    self.session.refresh_connection(_connection)
+                    time.sleep(2)
+                    _connection = self.session.connections.get()
 
         # Always return connection back to the pool!
         finally:
-            self.connections.put(_connection)
+            self.session.connections.put(_connection)
 
 
     # save_article()
     # ____________________________________________________________________________________
-    def save_article(self, response, article_number, max_retries=10, skip_binary=True):
+    def save_article(self, article_number, max_retries=10, skip_binary=True):
         try:
-            r, _, _, msg_list = response
-        except TypeError:
-            return False
-        msg_str = '\n'.join(msg_list) + '\n\n'
+            try:
+                response = self._download_article(article_number)
+                r, _, _, msg_list = response
+            except TypeError:
+                return False
+            msg_str = '\n'.join(msg_list) + '\n\n'
 
-        if is_binary(msg_str):
-            log.debug('skipping binary post, {0} {1}'.format(self.name, 
-                                                             article_number))
-            return False
+            if is_binary(msg_str):
+                log.debug('skipping binary post, {0} {1}'.format(self.name, 
+                                                                 article_number))
+                return False
 
-        # Convert msg_list into an `email.Message` object.
-        mbox = email.message_from_string(msg_str)
-        mbox = mbox.as_string(unixfrom=True)
+            # Convert msg_list into an `email.Message` object.
+            mbox = email.message_from_string(msg_str)
+            mbox = mbox.as_string(unixfrom=True)
 
-        # Compress chunk and append to gzip file.
-        mbox_fname = '{name}.{date}.mbox.gz.lck'.format(**self.__dict__)
-        compressed_chunk = inline_compress_chunk(mbox)
-        length = sys.getsizeof(compressed_chunk)
-        with self._mbox_lock:
-            with open(mbox_fname, 'a') as fp:
-                start = fp.tell()
-                fp.write(compressed_chunk)
+            # Compress chunk and append to gzip file.
+            mbox_fname = '{name}.{date}.mbox.gz.lck'.format(**self.__dict__)
+            compressed_chunk = inline_compress_chunk(mbox)
+            length = sys.getsizeof(compressed_chunk)
+            with self._mbox_lock:
+                with open(mbox_fname, 'a') as fp:
+                    start = fp.tell()
+                    fp.write(compressed_chunk)
 
-        # Append index information to idx file.
-        self.index_article(msg_str, article_number, start, length)
-        self.articles_archived.append(article_number)
-        log.info('saved article #{0} from {1}'.format(article_number, self.name))
+            # Append index information to idx file.
+            self.index_article(msg_str, article_number, start, length)
+            self.articles_archived.append(article_number)
+            log.debug('saved article #{0} from {1}'.format(article_number, self.name))
+            self.session.update_stats()
+        except Exception as exc:
+            traceback.print_exc(file=sys.stdout)
+            print exc
 
 
     # index_article()
