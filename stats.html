@@ -1,0 +1,25 @@
+<html>
+    <style>
+    div {
+      border:1px dashed gray;
+      margin:10px;
+      padding:5px;
+      background-color:wheat;
+      font-family:monospace;
+      white-space: pre;
+    }
+    b {
+      font-size: 10pt;
+      background-color: #dddddd;
+      display:block;
+    }
+    </style>
+    <div>Links: <a href="/metamgr.php?w_collection=giganews*&mode=more">meta-mgr</a> <a href="http://collections.archive.org:8088/mrtg/">mrtg</a> <a href="http://collections.archive.org:8088/cgi-bin/host_stats.py">host-stats</a></div>
+    <div><b>Download rate</b>
+        <img src="/~jake/analytics/stats.png">
+        <b>Current rate:</b> {{ stats.current_rate }}
+        <b>Average rate:</b> {{ stats.avg_rate }}
+        <b>Days left:</b> {{ stats.days_left }}
+    </div>
+    <div><b>df (/bin/df -h /3):</b> <pre>{{ stats.df }}</pre></div>
+    <div><b>netstat  | grep giganews | grep ESTABLISHED | wc -l:</b>{{ stats.open_cons }}</div>
