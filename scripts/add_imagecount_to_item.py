@@ -17,11 +17,10 @@ if __name__ == '__main__':
     identifier = sys.argv[-1]
     item = get_item(identifier)
     count = 0
-    for f in item.files():
+    for f in item.iter_files():
         if f.format == 'Comma-Separated Values GZ':
             gf = get_gzip_file_from_url(f.url)
             count += len([x for x in gf if x]) - 1
-    print count
     md = dict(imagecount=count)
     print item.metadata['metadata'].get('title')
     print '{0}\t{1}'.format(item.identifier, item.modify_metadata(md).get('status_code'))
