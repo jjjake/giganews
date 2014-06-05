@@ -49,7 +49,7 @@ def render_html(rates):
         df=df(),
         open_cons=get_open_connections(),
     )
-    template = Template(open('/3/data/giganews/giganews/stats.html').read())
+    template = Template(open('scripts/stats.html').read())
     html = template.render(stats=stats)
     with open('/home/jake/public_html/analytics/giganews.html', 'wb') as fp:
         fp.write(html)

@@ -49,3 +49,6 @@ imagecount:
 
 imagecount-all: itemlist.txt
 	parallel --gnu 'scripts/add_imagecount_to_item.py {}' < itemlist.txt 1> imagecount.log 2> imagecount.error &
+
+stats:
+	/usr/bin/python /3/data/giganews/giganews/scripts/stats.py
