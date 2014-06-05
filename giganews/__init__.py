@@ -16,12 +16,12 @@ usage:
 """
 
 __title__ = 'giganews'
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 __author__ = 'Jake Johnson'
 __license__ = 'AGPL 3'
 __copyright__ = 'Copyright 2014 Internet Archive'
 
-from .giganews import NewsGroup
+from .giganews import NewsGroup, GiganewsSession
 # Set default logging handler to avoid "No handler found" warnings.
 import logging
 try: # Python 2.7+
@@ -55,7 +55,8 @@ def set_logger(log_level, path, logger_name='giganews'):
     fh = logging.FileHandler(path)
     ch = logging.StreamHandler()
 
-    fh.setLevel(log_level)
+    #fh.setLevel(log_level)
+    fh.setLevel(logging.INFO)
     ch.setLevel(logging.INFO)
 
     formatter = logging.Formatter(FmtString)
