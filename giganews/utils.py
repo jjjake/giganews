@@ -83,7 +83,7 @@ def utf8_encode_str(string, encoding='UTF-8'):
 
 # inline_compress_chunk()
 # ________________________________________________________________________________________
-def inline_compress_chunk(chunk, level=9):
+def inline_compress_chunk(chunk, level=1):
     """Compress a string using gzip.
 
     :type chunk: str
