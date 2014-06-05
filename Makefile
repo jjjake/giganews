@@ -43,3 +43,9 @@ clean-pyc:
 
 count_articles:
 	echo "$$(zcat *csv.gz | wc -l)+$$(cat *csv | wc -l)" | bc
+
+imagecount:
+	scripts/add_imagecount_to_item.py ${id}
+
+imagecount-all: itemlist.txt
+	parallel --gnu 'scripts/add_imagecount_to_item.py {}' < itemlist.txt 1> imagecount.log 2> imagecount.error &
