@@ -49,15 +49,16 @@ def audit_mbox(mbox_fname, idx_fname, state_fname):
     exit_code = p.wait()
     msg_count = 0
     msg_ids = []
-    for i, m in enumerate(mailbox.mbox(tmp_mbox_fname)):
-        msg_count += 1 # message counter.
+    msg_count = len(list(mailbox.mbox(tmp_mbox_fname).iterkeys()))
+    ###for i, m in enumerate(mailbox.mbox(tmp_mbox_fname)):
+    ###    msg_count += 1 # message counter.
 
-        # Test that the given message is indexed.
-        if any(m.get('Message-ID', '') in l for l in idx) != True \
-            or not m.get('Message-ID'):
-            sys.stderr.write('{m} has invalid index!\n'.format(m=mbox_fname))
-            clean_up(mbox_fname, idx_fname, state_fname)
-        msg_ids.append(m.get('Message-ID', ''))
+    ###    # Test that the given message is indexed.
+    ###    if any(m.get('Message-ID', '') in l for l in idx) != True \
+    ###        or not m.get('Message-ID'):
+    ###        sys.stderr.write('{m} has invalid index!\n'.format(m=mbox_fname))
+    ###        clean_up(mbox_fname, idx_fname, state_fname)
+    ###    msg_ids.append(m.get('Message-ID', ''))
 
     # Test that the MBOX and IDX contain the same number of messages.
     if msg_count != len(idx):
@@ -100,12 +101,12 @@ def audit_mbox(mbox_fname, idx_fname, state_fname):
             clean_up(mbox_fname, idx_fname, state_fname)
             sys.exit(1)
 
-        # Test for valid row count.
-        if not any(m == msg_id for m in msg_ids):
-            sys.stderr.write(
-                '{i} has extra or missing rows!\n'.format(i=idx_fname))
-            clean_up(mbox_fname, idx_fname, state_fname)
-            sys.exit(1)
+        #### Test for valid row count.
+        ###if not any(m == msg_id for m in msg_ids):
+        ###    sys.stderr.write(
+        ###        '{i} has extra or missing rows!\n'.format(i=idx_fname))
+        ###    clean_up(mbox_fname, idx_fname, state_fname)
+        ###    sys.exit(1)
 
     os.remove(tmp_mbox_fname)
     return msg_count
