@@ -14,7 +14,7 @@ setup(
     install_requires=[
         'pynntp==0.8.4',
         'futures==2.1.6',
-        'gevent==1.0',
+        'gevent==23.9.1',
         'chardet==2.2.1',
         'python-magic==0.4.6',
         'internetarchive==0.5.7',
